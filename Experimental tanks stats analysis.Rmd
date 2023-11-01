@@ -1,0 +1,65 @@
+
+
+```{r}
+setwd("~/Desktop/Emory/Civitello Lab/Data/Size Structure 2021")
+tr = read.csv("combined prevalence data_w tank.csv")
+head(tr)
+tr = subset(tr, Tank != 0)
+head(tr)
+
+library(glmmTMB)
+library(emmeans)
+
+
+colnames(tr)[1] = "Date"
+
+head(tr)
+tr$Date = as.factor(tr$Date)
+tr$Tank = as.factor(tr$Tank)
+
+ 
+
+m1 = glmmTMB(cbind(NumInfec, NumUninfec) ~ Structure + P_Level + (1|Tank) + (1|Date), data=tr, family="binomial")
+summary(m1)
+
+ 
+emmeans(m1, pairwise ~ Structure)
+
+#each of the sizes, across structure
+
+m2 = glmmTMB(cbind(NumInfec, NumUninfec) ~ Structure + P_Level + (1|Date), data=subset(tr, Size=="Small"), family="binomial")
+
+summary(m2)
+
+emmeans(m2, pairwise ~ Structure)
+
+
+m3 = glmmTMB(cbind(NumInfec, NumUninfec) ~ Structure + P_Level + (1|Date), data=subset(tr, Size=="Medium"), family="binomial")
+
+summary(m3)
+emmeans(m3, pairwise ~ Structure)
+
+
+
+m4 = glmmTMB(cbind(NumInfec, NumUninfec) ~ Structure + P_Level + (1|Date), data=subset(tr, Size=="Large"), family="binomial")
+
+summary(m4)
+emmeans(m4, pairwise ~ Structure)
+
+
+#just size
+m5 = glmmTMB(cbind(NumInfec, NumUninfec) ~ Size + P_Level + (1|Tank) + (1|Date), data=tr, family="binomial")
+summary(m5)
+
+ 
+emmeans(m5, pairwise ~ Size)
+
+?emmeans
+```
+
+```{r}
+citation("glmmTMB")
+citation("emmeans")
+
+```
+

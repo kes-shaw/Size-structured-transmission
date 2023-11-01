@@ -1,0 +1,481 @@
+---
+
+---
+
+#Set working directory and import data
+```{r}
+setwd("~/Desktop/Emory/Civitello Lab/Data/Size Structure 2021/analysis")
+
+dataset<-read.csv("Cleaned Prevalence Data V2.csv")
+dataset
+
+controls = read.csv("Controls.csv")
+controls
+
+sizegradient = read.csv("ganesh_snail_size.csv")
+sizegradient[,"Size"] = round(sizegradient[,"Size"], digits=1) # ignore false precision from imageJ
+sizegradient
+
+library("ggplot2")
+library("tidyverse")
+library("bbmle")
+library("MASS") # for mvrnorm
+library("GGally") # For pairs plot
+```
+
+#Predictions
+```{r}
+prev_all = function(t=1, sigma_0, epsilon_0, P0, N_S, N_M, N_L, D_S, D_M, D_L, I_S, I_M, I_L) {
+  prev_S = 1- exp(-sigma_0*(epsilon_0/(epsilon_0*N_S+epsilon_0*N_M+epsilon_0*N_L))*P0*(1-exp(-t*(epsilon_0*N_S+epsilon_0*N_M+epsilon_0*N_L))))
+  prev_M = 1- exp(-sigma_0*(epsilon_0/(epsilon_0*N_S+epsilon_0*N_M+epsilon_0*N_L))*P0*(1-exp(-t*(epsilon_0*N_S+epsilon_0*N_M+epsilon_0*N_L))))
+  prev_L = 1- exp(-sigma_0*(epsilon_0/(epsilon_0*N_S+epsilon_0*N_M+epsilon_0*N_L))*P0*(1-exp(-t*(epsilon_0*N_S+epsilon_0*N_M+epsilon_0*N_L))))
+  c(prev_S, prev_M, prev_L)
+
+}
+
+prev_all(sigma_0 = .2, epsilon_0 = 10, P0 = 0, N_S = 6, N_M = 6, N_L = 6, D_S = 0, D_M = 0, D_L = 0)
+```
+
+#Negative Log Likelihoods (NLLS)
+```{r}
+NLL_rep = function(t=1, sigma_0, epsilon_0, P0, N_S, N_M, N_L, D_S, D_M, D_L, I_S, I_M, I_L) {
+  #transformations
+  #sigma_0 = 1/(1+exp(-sigma_0))
+  #epsilon_0 = exp(epsilon_0)
+  epsilon_S = epsilon_0
+  epsilon_M = epsilon_0
+  epsilon_L = epsilon_0
+  
+  sigma_S = sigma_0
+  sigma_M = sigma_0
+  sigma_L = sigma_0
+
+  prev_S = 1- exp(-sigma_S*(epsilon_0/(epsilon_S*N_S+epsilon_M*N_M+epsilon_L*N_L))*P0*(1-exp(-t*(epsilon_S*N_S+epsilon_M*N_M+epsilon_L*N_L))))
+  prev_M = 1- exp(-sigma_M*(epsilon_0/(epsilon_S*N_S+epsilon_M*N_M+epsilon_L*N_L))*P0*(1-exp(-t*(epsilon_S*N_S+epsilon_M*N_M+epsilon_L*N_L))))
+  prev_L = 1- exp(-sigma_L*(epsilon_0/(epsilon_S*N_S+epsilon_M*N_M+epsilon_L*N_L))*P0*(1-exp(-t*(epsilon_S*N_S+epsilon_M*N_M+epsilon_L*N_L))))
+  NLL_S = -(dbinom(x=I_S, prob = prev_S, size = D_S, log = T))
+  NLL_M = -(dbinom(x=I_M, prob = prev_M, size = D_M, log = T))
+  NLL_L = -(dbinom(x=I_L, prob = prev_L, size = D_L, log = T))
+  NLL_S + NLL_M + NLL_L
+
+  }
+
+NLL_rep(t=1, sigma_0 = .2, epsilon_0 = 1, P0 = 144, N_S = 6, N_M = 6, N_L = 6, D_S = 6, D_M = 6, D_L = 6, I_S = 1, I_M = 2, I_L = 3)
+```
+
+#NLL for the entire experiment, and bringing the data in
+```{r}
+NLL_experiment = function(t=1, sigma_0, epsilon_0, df = dataset, control_df = controls, size_df = sizegradient, vol=15) {
+  NLLs = mapply(NLL_rep, P0 = df[,"P_Level"]*18/vol, N_S = df[,"Start_Small"]/vol, N_M = df[,"Start_Med"]/vol, N_L = df[,"Start_Large"]/vol,D_S = df[,"D_Small"], D_M = df[,"D_Med"], D_L = df[,"D_Large"], I_S = df[,"Infec_Small"],I_M = df[,"Infec_Med"], I_L = df[,"Infec_Large"],
+                MoreArgs = list(t=t, sigma_0 = sigma_0, epsilon_0 = epsilon_0))
+  
+  # sigma_M for medium snails that were used in Becky's control trials
+  sigma_control = sigma_0
+  control_NLLs = -sum(dbinom(x = control_df[,"Infected"], prob = 1 - exp(-sigma_control*control_df[,"P_Level"]), size=1, log=T))
+  
+  # sigma_0 and sigma_L for snails from Ganesh's experiment
+  sizegradient_NLLs = -sum(dbinom(x = size_df[,"Infected"], prob = 1 - exp(-sigma_0*size_df[,"Miracidia"]), size=1, log=T))
+  
+  #NLLs
+  if(any(!is.finite(NLLs) | !is.finite(control_NLLs) | !is.finite(sizegradient_NLLs))){return(NA)}else{sum(c(NLLs, control_NLLs, sizegradient_NLLs))}
+}
+
+NLL_experiment(t=1, sigma_0 = 0.2, epsilon_0 = 1, df = dataset, control_df = controls)
+```
+
+#Model Fitting (MLES)
+```{r warning=FALSE}
+m_null = mle2(minuslogl = NLL_experiment, start = list(epsilon_0 = 1, sigma_0 = 0.3))
+warnings()
+m_null
+
+# Profiling doesn't work because the parameters are negatively correlated, but this can be addressed w/ "control snail" data
+#p_null = profile(m_null)
+#plot(p_null)
+#log(coef(m_null))
+
+```
+
+#Negative Log Likelihoods (NLLS) for size-dependent model
+```{r}
+NLL_rep_size = function(t=1, sigma_0, epsilon_0, sigma_sz, epsilon_sz, P0, N_S, N_M, N_L, D_S, D_M, D_L, I_S, I_M, I_L) {
+
+  epsilon_S = epsilon_0*exp(epsilon_sz*3.02)
+  epsilon_M = epsilon_0*exp(epsilon_sz*7.57)
+  epsilon_L = epsilon_0*exp(epsilon_sz*13.7)
+  
+  sigma_S = sigma_0*exp(sigma_sz*3.02)
+  sigma_M = sigma_0*exp(sigma_sz*7.57)
+  sigma_L = sigma_0*exp(sigma_sz*13.7)
+
+  prev_S = 1- exp(-sigma_S*(epsilon_S/(epsilon_S*N_S+epsilon_M*N_M+epsilon_L*N_L))*P0*(1-exp(-t*(epsilon_S*N_S+epsilon_M*N_M+epsilon_L*N_L))))
+  prev_M = 1- exp(-sigma_M*(epsilon_M/(epsilon_S*N_S+epsilon_M*N_M+epsilon_L*N_L))*P0*(1-exp(-t*(epsilon_S*N_S+epsilon_M*N_M+epsilon_L*N_L))))
+  prev_L = 1- exp(-sigma_L*(epsilon_L/(epsilon_S*N_S+epsilon_M*N_M+epsilon_L*N_L))*P0*(1-exp(-t*(epsilon_S*N_S+epsilon_M*N_M+epsilon_L*N_L))))
+  NLL_S = -(dbinom(x=I_S, prob = prev_S, size = D_S, log = T))
+  NLL_M = -(dbinom(x=I_M, prob = prev_M, size = D_M, log = T))
+  NLL_L = -(dbinom(x=I_L, prob = prev_L, size = D_L, log = T))
+  NLL_S + NLL_M + NLL_L
+
+  }
+
+NLL_rep_size(t=1, sigma_0 = .2, epsilon_0 = 1, epsilon_sz=0, sigma_sz=0, P0 = 144, N_S = 6, N_M = 6, N_L = 6, D_S = 6, D_M = 6, D_L = 6, I_S = 1, I_M = 2, I_L = 3)
+```
+
+#NLL for the entire experiment, and bringing the data in
+```{r}
+NLL_experiment_size = function(t=1, sigma_0, epsilon_0, sigma_sz, epsilon_sz, df = dataset, control_df = controls, size_df = sizegradient, vol=15) {
+  NLLs = mapply(NLL_rep_size, P0 = df[,"P_Level"]*18/vol, N_S = df[,"Start_Small"]/vol, N_M = df[,"Start_Med"]/vol, N_L = df[,"Start_Large"]/vol,D_S = df[,"D_Small"], D_M = df[,"D_Med"], D_L = df[,"D_Large"], I_S = df[,"Infec_Small"],I_M = df[,"Infec_Med"], I_L = df[,"Infec_Large"],
+                MoreArgs = list(t=t, sigma_0 = sigma_0, epsilon_0 = epsilon_0, sigma_sz=sigma_sz, epsilon_sz=epsilon_sz))
+  
+  # sigma_M for medium snails that were used in Becky's control trials
+  sigma_control = sigma_0*exp(sigma_sz*7.57) # Need to check sizes
+  control_NLLs = -sum(dbinom(x = control_df[,"Infected"], prob = 1 - exp(-sigma_control*control_df[,"P_Level"]), size=1, log=T))
+  
+  # sigma_0 and sigma_L for snails from Ganesh's experiment
+  sizegradient_NLLs = -sum(dbinom(x = size_df[,"Infected"], prob = 1 - exp(-sigma_0*exp(sigma_sz*size_df[,"Size"])*size_df[,"Miracidia"]), size=1, log=T))
+  
+  #NLLs
+  if(any(!is.finite(NLLs) | !is.finite(control_NLLs) | !is.finite(sizegradient_NLLs))){return(NA)}else{sum(c(NLLs, control_NLLs, sizegradient_NLLs))}
+}
+
+NLL_experiment_size(t=1, sigma_0 = 0.2, epsilon_0 = 1, epsilon_sz=0, sigma_sz=0, df = dataset, control_df = controls)
+```
+
+
+#Model Fitting (MLES)
+```{r warning=FALSE}
+m_size = mle2(minuslogl = NLL_experiment_size, start = list(epsilon_0 = 1, sigma_0 = 0.3, sigma_sz=0, epsilon_sz=0))
+
+m_size
+m_sus= mle2(minuslogl = NLL_experiment_size, fixed = list(epsilon_sz=0), start = list(epsilon_0 = 1, sigma_0= 0.3, sigma_sz=0, epsilon_sz=0))
+
+AICtab(m_null, m_size, m_sus, delta=T, weights=T, base=T)
+
+p_size = profile(m_size)
+plot(p_size)
+?mle2
+
+
+```
+
+#Linear Negative Log Likelihoods (NLLS) for size-dependent model
+```{r}
+NLL_rep_size_linear = function(t=1, sigma_0, epsilon_0, sigma_sz, epsilon_sz, P0, N_S, N_M, N_L, D_S, D_M, D_L, I_S, I_M, I_L) {
+
+  epsilon_S = epsilon_0 + epsilon_sz*2.5
+  epsilon_M = epsilon_0 + epsilon_sz*7
+  epsilon_L = epsilon_0 + epsilon_sz*13.5
+  
+  # Will want to check these sizes
+  sigma_S = sigma_0 + sigma_sz*2.5
+  sigma_M = sigma_0 + sigma_sz*7
+  sigma_L = sigma_0 + sigma_sz*13.5
+
+  prev_S = 1- exp(-sigma_S*(epsilon_S/(epsilon_S*N_S+epsilon_M*N_M+epsilon_L*N_L))*P0*(1-exp(-t*(epsilon_S*N_S+epsilon_M*N_M+epsilon_L*N_L))))
+  prev_M = 1- exp(-sigma_M*(epsilon_M/(epsilon_S*N_S+epsilon_M*N_M+epsilon_L*N_L))*P0*(1-exp(-t*(epsilon_S*N_S+epsilon_M*N_M+epsilon_L*N_L))))
+  prev_L = 1- exp(-sigma_L*(epsilon_L/(epsilon_S*N_S+epsilon_M*N_M+epsilon_L*N_L))*P0*(1-exp(-t*(epsilon_S*N_S+epsilon_M*N_M+epsilon_L*N_L))))
+  NLL_S = -(dbinom(x=I_S, prob = prev_S, size = D_S, log = T))
+  NLL_M = -(dbinom(x=I_M, prob = prev_M, size = D_M, log = T))
+  NLL_L = -(dbinom(x=I_L, prob = prev_L, size = D_L, log = T))
+  NLL_S + NLL_M + NLL_L
+
+  }
+
+NLL_rep_size_linear(t=1, sigma_0 = .2, epsilon_0 = 1, epsilon_sz=0, sigma_sz=0, P0 = 144, N_S = 6, N_M = 6, N_L = 6, D_S = 6, D_M = 6, D_L = 6, I_S = 1, I_M = 2, I_L = 3)
+```
+
+#Linear NLL for the entire experiment, and bringing the data in
+```{r}
+NLL_experiment_size_linear = function(t=1, sigma_0, epsilon_0, sigma_sz, epsilon_sz, df = dataset, control_df = controls, size_df = sizegradient, vol=15) {
+  NLLs = mapply(NLL_rep_size_linear, P0 = df[,"P_Level"]*18/vol, N_S = df[,"Start_Small"]/vol, N_M = df[,"Start_Med"]/vol, N_L = df[,"Start_Large"]/vol,D_S = df[,"D_Small"], D_M = df[,"D_Med"], D_L = df[,"D_Large"], I_S = df[,"Infec_Small"],I_M = df[,"Infec_Med"], I_L = df[,"Infec_Large"],
+                MoreArgs = list(t=t, sigma_0 = sigma_0, epsilon_0 = epsilon_0, sigma_sz=sigma_sz, epsilon_sz=epsilon_sz))
+  # sigma_M for medium snails that were used in Becky's control trials
+  sigma_control = sigma_0 + sigma_sz*7 # Need to check sizes
+  control_NLLs = -sum(dbinom(x = control_df[,"Infected"], prob = 1 - exp(-sigma_control*control_df[,"P_Level"]), size=1, log=T))
+  
+  # sigma_0 and sigma_L for snails from Ganesh's experiment
+  sizegradient_NLLs = -sum(dbinom(x = size_df[,"Infected"], prob = 1 - exp(-sigma_0*exp(sigma_sz*size_df[,"Size"])*size_df[,"Miracidia"]), size=1, log=T))
+  
+  #NLLs
+  if(any(!is.finite(NLLs) | !is.finite(control_NLLs) | !is.finite(sizegradient_NLLs))){return(NA)}else{sum(c(NLLs, control_NLLs, sizegradient_NLLs))}
+}
+
+NLL_experiment_size_linear(t=1, sigma_0 = 0.2, epsilon_0 = 1, epsilon_sz=0, sigma_sz=0, df = dataset, control_df = controls)
+```
+
+
+# Linear Model Fitting (MLES)
+```{r warning=FALSE}
+m_size_lin = mle2(minuslogl = NLL_experiment_size_linear, start = list(epsilon_0 = 1, sigma_0 = 0.3, sigma_sz=-0.01, epsilon_sz=0.02),
+                  control=list(parscale = c(epsilon_0 = 1, sigma_0 = 0.3, sigma_sz=-0.01, epsilon_sz=0.02)))
+
+m_size_lin
+
+AICtab(m_null, m_size, m_size_lin, delta=T, weights=T)
+
+AICtab(m_size_batch, m_size_lin, delta=T, weights=T)
+
+p_size_lin = profile(m_size_lin)
+plot(p_size_lin)
+?mle2
+
+
+```
+
+#controls
+```{r}
+#controls = read.csv("C:/RData/Becky_controls.csv")
+#head(controls)
+m_controls_null = mle2(Infected ~ dbinom(prob = 1 - exp(-sigma*P_Level), size=1), start = list(sigma = 0.2), data=controls)
+m_controls_null
+
+m_controls_batch = mle2(Infected ~ dbinom(prob = 1 - exp(-sigma*P_Level), size=1), start = list(sigma = 0.2),
+                        parameters = list(sigma ~ Batch-1), data=controls)
+m_controls_batch
+
+AICctab(m_controls_null, m_controls_batch, delta=T, weights=T, sort=T, nobs=206)
+
+p_batch = profile(m_controls_batch)
+plot(p_batch)
+```
+```{r}
+NLL_experiment_size_batches = function(t=1, sigma_0_A,  sigma_0_B, sigma_0_C, sigma_0_D, sigma_0_E, epsilon_0, sigma_sz, epsilon_sz, df = dataset, control_df = controls, size_df = sizegradient, 
+                                       vol=15) {
+  df_A = subset(df, Exposure.Date == "3/25/21")
+  df_B = subset(df, Exposure.Date == "9/24/21")
+  df_C = subset(df, Exposure.Date == "10/19/21")
+  df_D = subset(df, Exposure.Date == "11/9/21")
+  
+  control_df_A = subset(control_df, Batch == "A")
+  control_df_B = subset(control_df, Batch == "B")
+  control_df_C = subset(control_df, Batch == "C")
+  control_df_D = subset(control_df, Batch == "D")
+  
+  # Run the NLLs calculation for each of the four batches
+  NLLs_A = mapply(NLL_rep_size, P0 = df_A[,"P_Level"]*18/vol, N_S = df_A[,"Start_Small"]/vol, N_M = df_A[,"Start_Med"]/vol, N_L = df_A[,"Start_Large"]/vol,D_S = df_A[,"D_Small"], D_M = df_A[,"D_Med"], D_L = df_A[,"D_Large"], I_S = df_A[,"Infec_Small"],I_M = df_A[,"Infec_Med"], I_L = df_A[,"Infec_Large"],
+                MoreArgs = list(t=t, sigma_0 = sigma_0_A, epsilon_0 = epsilon_0, sigma_sz=sigma_sz, epsilon_sz=epsilon_sz))
+    
+    NLLs_B = mapply(NLL_rep_size, P0 = df_B[,"P_Level"]*18/vol, N_S = df_B[,"Start_Small"]/vol, N_M = df_B[,"Start_Med"]/vol, N_L = df_B[,"Start_Large"]/vol,D_S = df_B[,"D_Small"], D_M = df_B[,"D_Med"], D_L = df_B[,"D_Large"], I_S = df_B[,"Infec_Small"],I_M = df_B[,"Infec_Med"], I_L = df_B[,"Infec_Large"],
+                MoreArgs = list(t=t, sigma_0 = sigma_0_B, epsilon_0 = epsilon_0, sigma_sz=sigma_sz, epsilon_sz=epsilon_sz)) 
+    
+    NLLs_C = mapply(NLL_rep_size, P0 = df_C[,"P_Level"]*18/vol, N_S = df_C[,"Start_Small"]/vol, N_M = df_C[,"Start_Med"]/vol, N_L = df_C[,"Start_Large"]/vol,D_S = df_C[,"D_Small"], D_M = df_C[,"D_Med"], D_L = df_C[,"D_Large"], I_S = df_C[,"Infec_Small"],I_M = df_C[,"Infec_Med"], I_L = df_C[,"Infec_Large"],
+                MoreArgs = list(t=t, sigma_0 = sigma_0_C, epsilon_0 = epsilon_0, sigma_sz=sigma_sz, epsilon_sz=epsilon_sz)) 
+    
+  NLLs_D = mapply(NLL_rep_size, P0 = df_D[,"P_Level"]*18/vol, N_S = df_D[,"Start_Small"]/vol, N_M = df_D[,"Start_Med"]/vol, N_L = df_D[,"Start_Large"]/vol,D_S = df_D[,"D_Small"], D_M = df_D[,"D_Med"], D_L = df_D[,"D_Large"], I_S = df_D[,"Infec_Small"],I_M = df_D[,"Infec_Med"], I_L = df_D[,"Infec_Large"],
+                MoreArgs = list(t=t, sigma_0 = sigma_0_D, epsilon_0 = epsilon_0, sigma_sz=sigma_sz, epsilon_sz=epsilon_sz)) 
+    
+  
+  # sigma_M for medium snails that were used in Becky's control trials
+sigma_control_A = sigma_0_A*exp(sigma_sz*7) # Need to check sizes
+control_NLLs_A = -sum(dbinom(x = control_df_A[,"Infected"], prob = 1 - exp(-sigma_control_A*control_df_A[,"P_Level"]), size=1, log=T))
+
+sigma_control_B = sigma_0_B*exp(sigma_sz*7) # Need to check sizes
+control_NLLs_B = -sum(dbinom(x = control_df_B[,"Infected"], prob = 1 - exp(-sigma_control_B*control_df_B[,"P_Level"]), size=1, log=T))
+
+sigma_control_C = sigma_0_C*exp(sigma_sz*7) # Need to check sizes
+control_NLLs_C = -sum(dbinom(x = control_df_C[,"Infected"], prob = 1 - exp(-sigma_control_C*control_df_C[,"P_Level"]), size=1, log=T))
+
+sigma_control_D = sigma_0_D*exp(sigma_sz*7) # Need to check sizes
+control_NLLs_D = -sum(dbinom(x = control_df_D[,"Infected"], prob = 1 - exp(-sigma_control_D*control_df_D[,"P_Level"]), size=1, log=T))
+
+  # sigma_0 and sigma_L for snails from Ganesh's experiment
+  sizegradient_NLLs = -sum(dbinom(x = size_df[,"Infected"], prob = 1 - exp(-sigma_0_E*exp(sigma_sz*size_df[,"Size"])*size_df[,"Miracidia"]), size=1, log=T))
+  
+  NLLs = c(NLLs_A, NLLs_B, NLLs_C, NLLs_D)
+  NLLs = as.vector(NLLs, mode = "numeric")
+  control_NLLs = c(control_NLLs_A, control_NLLs_B, control_NLLs_C, control_NLLs_D)
+  control_NLLs = as.vector(control_NLLs, mode = "numeric")
+  
+  #NLLs
+  if(any(!is.finite(NLLs) | !is.finite(control_NLLs) | !is.finite(sizegradient_NLLs))){return(NA)}else{sum(c(NLLs, control_NLLs, sizegradient_NLLs))}
+
+    }
+
+
+
+NLL_experiment_size_batches(t=1, sigma_0_A = 0.2, sigma_0_B = 0.2, sigma_0_C = 0.2, sigma_0_D = 0.2, sigma_0_E = 0.2,
+                    epsilon_0 = 1, epsilon_sz=0, sigma_sz=0, df = dataset, control_df = controls)
+```
+
+```{r NLL experiment size batch LINEAR}
+NLL_experiment_size_batches_linear = function(t=1, sigma_0_A,  sigma_0_B, sigma_0_C, sigma_0_D, sigma_0_E, 
+                                       epsilon_0, sigma_sz, epsilon_sz, df = dataset, control_df = controls, size_df = sizegradient, 
+                                       vol=15) {
+  df_A = subset(df, Exposure.Date == "3/25/21")
+  df_B = subset(df, Exposure.Date == "9/24/21")
+  df_C = subset(df, Exposure.Date == "10/19/21")
+  df_D = subset(df, Exposure.Date == "11/9/21")
+  
+  control_df_A = subset(control_df, Batch == "A")
+  control_df_B = subset(control_df, Batch == "B")
+  control_df_C = subset(control_df, Batch == "C")
+  control_df_D = subset(control_df, Batch == "D")
+  
+  # Run the NLLs calculation for each of the four batches
+    NLLs_A = mapply(NLL_rep_size_linear, P0 = df_A[,"P_Level"]*18/vol, N_S = df_A[,"Start_Small"]/vol, N_M = df_A[,"Start_Med"]/vol, N_L = df_A[,"Start_Large"]/vol,D_S = df_A[,"D_Small"], D_M = df_A[,"D_Med"], D_L = df_A[,"D_Large"], I_S = df_A[,"Infec_Small"],I_M = df_A[,"Infec_Med"], I_L = df_A[,"Infec_Large"],
+                MoreArgs = list(t=t, sigma_0 = sigma_0_A, epsilon_0 = epsilon_0, sigma_sz=sigma_sz, epsilon_sz=epsilon_sz))
+    
+    NLLs_B = mapply(NLL_rep_size_linear, P0 = df_B[,"P_Level"]*18/vol, N_S = df_B[,"Start_Small"]/vol, N_M = df_B[,"Start_Med"]/vol, N_L = df_B[,"Start_Large"]/vol,D_S = df_B[,"D_Small"], D_M = df_B[,"D_Med"], D_L = df_B[,"D_Large"], I_S = df_B[,"Infec_Small"],I_M = df_B[,"Infec_Med"], I_L = df_B[,"Infec_Large"],
+                MoreArgs = list(t=t, sigma_0 = sigma_0_B, epsilon_0 = epsilon_0, sigma_sz=sigma_sz, epsilon_sz=epsilon_sz)) 
+    
+    NLLs_C = mapply(NLL_rep_size_linear, P0 = df_C[,"P_Level"]*18/vol, N_S = df_C[,"Start_Small"]/vol, N_M = df_C[,"Start_Med"]/vol, N_L = df_C[,"Start_Large"]/vol,D_S = df_C[,"D_Small"], D_M = df_C[,"D_Med"], D_L = df_C[,"D_Large"], I_S = df_C[,"Infec_Small"],I_M = df_C[,"Infec_Med"], I_L = df_C[,"Infec_Large"],
+                MoreArgs = list(t=t, sigma_0 = sigma_0_C, epsilon_0 = epsilon_0, sigma_sz=sigma_sz, epsilon_sz=epsilon_sz)) 
+    
+  NLLs_D = mapply(NLL_rep_size_linear, P0 = df_D[,"P_Level"]*18/vol, N_S = df_D[,"Start_Small"]/vol, N_M = df_D[,"Start_Med"]/vol, N_L = df_D[,"Start_Large"]/vol,D_S = df_D[,"D_Small"], D_M = df_D[,"D_Med"], D_L = df_D[,"D_Large"], I_S = df_D[,"Infec_Small"],I_M = df_D[,"Infec_Med"], I_L = df_D[,"Infec_Large"],
+                MoreArgs = list(t=t, sigma_0 = sigma_0_D, epsilon_0 = epsilon_0, sigma_sz=sigma_sz, epsilon_sz=epsilon_sz)) 
+    
+      # NLLs = mapply(NLL_rep_size, P0 = df[,"P_Level"]*18/vol, N_S = df[,"Start_Small"]/vol, N_M = df[,"Start_Med"]/vol, N_L = df[,"Start_Large"]/vol,D_S = df[,"D_Small"], D_M = df[,"D_Med"], D_L = df[,"D_Large"], I_S = df[,"Infec_Small"],I_M = df[,"Infec_Med"], I_L = df[,"Infec_Large"],
+      #           MoreArgs = list(t=t, sigma_0 = sigma_0, epsilon_0 = epsilon_0, sigma_sz=sigma_sz, epsilon_sz=epsilon_sz))
+  
+  # sigma_M for medium snails that were used in Becky's control trials
+sigma_control_A = sigma_0_A + sigma_sz*7 # Need to check sizes
+control_NLLs_A = -sum(dbinom(x = control_df_A[,"Infected"], prob = 1 - exp(-sigma_control_A*control_df_A[,"P_Level"]), size=1, log=T))
+
+sigma_control_B = sigma_0_B + sigma_sz*7 # Need to check sizes
+control_NLLs_B = -sum(dbinom(x = control_df_B[,"Infected"], prob = 1 - exp(-sigma_control_B*control_df_B[,"P_Level"]), size=1, log=T))
+
+sigma_control_C = sigma_0_C + sigma_sz*7 # Need to check sizes
+control_NLLs_C = -sum(dbinom(x = control_df_C[,"Infected"], prob = 1 - exp(-sigma_control_C*control_df_C[,"P_Level"]), size=1, log=T))
+
+sigma_control_D = sigma_0_D + sigma_sz*7 # Need to check sizes
+control_NLLs_D = -sum(dbinom(x = control_df_D[,"Infected"], prob = 1 - exp(-sigma_control_D*control_df_D[,"P_Level"]), size=1, log=T))
+
+  #   # sigma_M for medium snails that were used in Becky's control trials
+  # sigma_control = sigma_0*exp(sigma_sz*7) # Need to check sizes
+  # control_NLLs = -sum(dbinom(x = control_df[,"Infected"], prob = 1 - exp(-sigma_control*control_df[,"P_Level"]), size=1, log=T))
+
+  # sigma_0 and sigma_L for snails from Ganesh's experiment
+  sizegradient_NLLs = -sum(dbinom(x = size_df[,"Infected"], prob = 1 - exp(-sigma_0_E*exp(sigma_sz*size_df[,"Size"])*size_df[,"Miracidia"]), size=1, log=T))
+  
+  NLLs = as.vector(c(NLLs_A, NLLs_B, NLLs_C, NLLs_D), mode="numeric")
+  control_NLLs = as.vector(c(control_NLLs_A, control_NLLs_B, control_NLLs_C, control_NLLs_D), mode="numeric")
+  
+  #NLLs
+  if(any(!is.finite(NLLs) | !is.finite(control_NLLs) | !is.finite(sizegradient_NLLs))){return(NA)}else{sum(c(NLLs, control_NLLs, sizegradient_NLLs))}
+
+}
+
+NLL_experiment_size_batches_linear(t=1, sigma_0_A = 0.2, sigma_0_B = 0.2, sigma_0_C = 0.2, sigma_0_D = 0.2, sigma_0_E = 0.2,
+                    epsilon_0 = 1, epsilon_sz=0, sigma_sz=0, df = dataset, control_df = controls)
+```
+
+
+```{r warning=FALSE}
+m_size_batch = mle2(minuslogl = NLL_experiment_size_batches, start = list(epsilon_0 = 0.19, sigma_0_A = 0.3, 
+                                                                            sigma_0_B = 0.3, 
+                                                                            sigma_0_C = 0.3, 
+                                                                            sigma_0_D = 0.3, 
+                                                                            sigma_0_E = 0.3, 
+                                                                            sigma_sz=-0.2, epsilon_sz=0.195))
+
+m_size_batch
+summary(m_size_batch)
+AICtab(m_size_batch, m_null_batch, base=T,delta=T, weights=T)
+
+m_sus_only_batch = mle2(minuslogl = NLL_experiment_size_batches, fixed = list(epsilon_sz=0), start = list(epsilon_0 = .19, sigma_0_A = 0.3, sigma_0_B = 0.3, sigma_0_C = 0.3, sigma_0_D = 0.3, sigma_0_E = 0.3, sigma_sz=-.252, epsilon_sz=0))
+
+m_exp_only_batch = mle2(minuslogl = NLL_experiment_size_batches, fixed = list(sigma_sz=0), start = list(epsilon_0 = 1, sigma_0_A = 0.3, sigma_0_B = 0.3, sigma_0_C = 0.3, sigma_0_D = 0.3, sigma_0_E = 0.3, sigma_sz=0, epsilon_sz=0))
+
+m_null_batch = mle2(minuslogl = NLL_experiment_size_batches, fixed = list(sigma_sz=0, epsilon_sz=0), start = list(epsilon_0 = 1, sigma_0_A = 0.3, sigma_0_B = 0.3, sigma_0_C = 0.3, sigma_0_D = 0.3, sigma_0_E = 0.3, sigma_sz=0, epsilon_sz=0))
+
+AICtab(m_null_batch, m_sus_only_batch, m_size_batch, delta=T, weights=T, base=T)
+AICtab(m_null_batch, m_sus_only_batch, m_size_batch, m_exp_only_batch, delta=T, weights=T, base = T)
+
+p_size = profile(m_size)
+plot(p_size)
+
+
+
+```
+
+```{r warning=FALSE}
+m_size_batch_linear = mle2(minuslogl = NLL_experiment_size_batches_linear, start = list(epsilon_0 = 1, sigma_0_A = 0.5, 
+                                                                            sigma_0_B = 0.5, 
+                                                                            sigma_0_C = 0.5, 
+                                                                            sigma_0_D = 0.5, 
+                                                                            sigma_0_E = 0.5, 
+                                                                            sigma_sz=-0.02, epsilon_sz=0.1))
+
+m_size_batch_linear
+
+m_exp_only_batch_lin = m_exp_only_batch = mle2(minuslogl = NLL_experiment_size_batches_linear, fixed = list(sigma_sz=0), start = list(epsilon_0 = .19, sigma_0_A = 0.3, sigma_0_B = 0.3, sigma_0_C = 0.3, sigma_0_D = 0.3, sigma_0_E = 0.3, sigma_sz=-.2, epsilon_sz=.19))
+
+m_sus_only_batch_lin= mle2(minuslogl = NLL_experiment_size_batches_linear, fixed = list(epsilon_sz=0), start = list(epsilon_0 = .01, sigma_0_A = 1.5, sigma_0_B = 1.5, sigma_0_C = 1.5, sigma_0_D = 1.5, sigma_0_E = 1.5, sigma_sz=-.2, epsilon_sz=0))
+
+m_null_batch_lin=  mle2(minuslogl = NLL_experiment_size_batches_linear, fixed = list(sigma_sz=0, epsilon_sz=0), start = list(epsilon_0 = 1, sigma_0_A = 0.3, sigma_0_B = 0.3, sigma_0_C = 0.3, sigma_0_D = 0.3, sigma_0_E = 0.3, sigma_sz=0, epsilon_sz=0))
+  
+####exponential different models
+m_sus_only_batch = mle2(minuslogl = NLL_experiment_size_batches, fixed = list(epsilon_sz=0), start = list(epsilon_0 = .19, sigma_0_A = 0.3, sigma_0_B = 0.3, sigma_0_C = 0.3, sigma_0_D = 0.3, sigma_0_E = 0.3, sigma_sz=-.2, epsilon_sz=0))
+# 
+m_exp_only_batch = mle2(minuslogl = NLL_experiment_size_batches, fixed = list(sigma_sz=0), start = list(epsilon_0 = .19, sigma_0_A = 0.3, sigma_0_B = 0.3, sigma_0_C = 0.3, sigma_0_D = 0.3, sigma_0_E = 0.3, sigma_sz=-.2, epsilon_sz=.19))
+# 
+m_null_batch = mle2(minuslogl = NLL_experiment_size_batches, fixed = list(sigma_sz=0, epsilon_sz=0), start = list(epsilon_0 = 1, sigma_0_A = 0.3, sigma_0_B = 0.3, sigma_0_C = 0.3, sigma_0_D = 0.3, sigma_0_E = 0.3, sigma_sz=0, epsilon_sz=0))
+# 
+
+AICtab(m_null_batch, m_sus_only_batch, m_size_batch, m_exp_only_batch, delta=T, weights=T)
+AICtab(m_size_batch, m_size_batch_linear, delta=T, weights=T, base=T)
+
+
+system("say Just finished!")
+#p_size = profile(m_size)
+#plot(p_size)
+
+
+
+```
+
+#### Taking the confidence intervals from the profile and chugging through to make 95% CI for predictions in the field setting
+
+The profiled 95% CI for each parameter are broader than the 95% CIs for parameter combinations, by definition, so if we want to get 95% CIs for predictions in a new setting, i.e., the field data on sizes, then we can generate a bunch of parameter sets that provide fits within the 
+
+```{r}
+# We can approximate the 95% CI on parameter SETs by drawing the parameters from the multivariate normal, with the means specified by the parameter estimates and the variance-covariance matrix approximated by the information matrix
+
+# You can use the fitted information matrix to approximate the var-cov matrix for pars
+par_sets = data.frame(mvrnorm(10000, mu=coef(m_size), Sigma = vcov(m_size)))
+
+
+pairs(par_sets)
+
+
+NLL_for_par_sets = mapply(NLL_experiment_size,
+                    sigma_0 = par_sets$sigma_0, epsilon_0 = par_sets$epsilon_0,
+                      epsilon_sz=par_sets$epsilon_sz, sigma_sz=par_sets$sigma_sz)
+
+
+par_sets[,"NLL"] = NLL_for_par_sets
+
+# This cuts these distributions to the 95% for parameter sets
+ggpairs(subset(par_sets, NLL <= min(par_sets$NLL + 2)))
+
+
+good_pars = subset(par_sets, NLL <= min(par_sets$NLL + 2))
+
+field_predictions = function(sigma_0, epsilon_0, sigma_sz, epsilon_sz, field_data){
+  sizes = field_data[,"Snail_Size"]
+  Ns = field_data[,"Frequency"]
+  
+  #Calculating size-dependent parameters
+  sigmas = sigma_0*exp(sigma_sz*sizes)
+  epsilons = epsilon_0*exp(epsilon_sz*sizes)
+  
+  # Total exposure rate
+  total_exp = sum(epsilons*Ns)
+  
+  sum(sigmas*epsilons*Ns/total_exp)
+}
+
+field_snails = read.csv("snail_field_size_structures.csv")
+
+
+field_predictions(sigma_0 = good_pars[1,"sigma_0"], epsilon_0 = good_pars[1,"epsilon_0"], sigma_sz = good_pars[1,"sigma_sz"],epsilon_sz = good_pars[1,"epsilon_sz"], field_data = subset(field_snails, Date_US == "6/18/2000"))
+
+
+hist(mapply(field_predictions,
+                    sigma_0 = good_pars$sigma_0, epsilon_0 = good_pars$epsilon_0,
+                      epsilon_sz=good_pars$epsilon_sz, sigma_sz=good_pars$sigma_sz,
+                    MoreArgs = list(field_data = subset(field_snails, Date_US == "6/18/2000"))))
+
+
+```
+
